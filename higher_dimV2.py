@@ -73,8 +73,9 @@ with st.sidebar:
     st.subheader("Matrix case")
     case = st.radio(
         "Choose case",
-        ["Case 1: V=I, A sym PD",
+        ["Case 1: V=I, A arbitrary",
          "Case 2: A=I, V symmetric",
+         "Case 3: A=I, V rotation",
          "Case 4: A=I, V Hamiltonian",
          "Random"]
     )
@@ -84,41 +85,100 @@ with st.sidebar:
     st.markdown("---")
 
     # ── Case-specific parameters ──────────────────────────────────────────────
-    if case == "Case 1: V=I, A sym PD":
+    if case == "Case 1: V=I, A arbitrary":
         st.markdown(r"""
-**Case 1**: $V = I$, $A$ arbitrary (OA Proposition).
+**Case 1**: $V = I$, $A$ arbitrary.
 
-- **tr$(A) > 0$** → ρ → 1 for a.e. initial condition (**full clustering**)
-- **tr$(A) < 0$** and ‖sym$(A)$‖ > ‖skew$(A)$‖ → partial sync $E_2$, $\rho_* < 1$
+The precise conditions (from OA Proposition) are:
+
+- **Full clustering** ($\rho \to 1$): $A$ has at least one eigenvalue with
+  non-negative real part. Equivalently: $\mathrm{tr}(A) > 0$, or
+  $\mathrm{tr}(A) \leq 0$ and $\det(A) \leq 0$.
+- **Partial sync** ($\rho \to \rho_{\mathrm{eq}} \in (0,1)$):
+  $\frac{A+A^\top}{2} \prec 0$ (symmetric part of $A$ is negative definite).
         """)
-        regime  = st.radio("Regime", ["Clustering  tr(A) > 0", "Partial sync  tr(A) < 0"])
+        regime  = st.radio("Regime", [
+            "Full clustering: tr(A) > 0",
+            "Full clustering: tr(A) ≤ 0 & det(A) ≤ 0",
+            "Partial sync: (A+Aᵀ)/2 ≺ 0"
+        ])
         a_scale = st.slider("Off-diagonal scale", min_value=0.0, max_value=3.0, value=0.5, step=0.1,
-                            help="Scale of skew-symmetric perturbation.")
+                            help="Scale of skew-symmetric perturbation added to diagonal base.")
         Q_orth  = ortho_group.rvs(d, random_state=int(matrix_seed))
-        if regime.startswith("Clustering"):
+        if regime.startswith("Full clustering: tr(A) > 0"):
+            # tr(A) > 0: build A with all positive eigenvalues
             eigvals_A = rng_mat.uniform(0.5, 2.0, size=d)
             A_sym     = Q_orth @ np.diag(eigvals_A) @ Q_orth.T
             perturb   = rng_mat.normal(0.0, 1.0, (d, d))
             skew_pert = (perturb - perturb.T) * float(a_scale) * 0.2
             A  = A_sym + skew_pert
-            st.success(f"tr(A) = {np.trace(A):.3f} > 0 → **full clustering expected**")
+            ev_A = np.linalg.eigvals(A)
+            st.success(
+                f"tr(A) = {np.trace(A):.3f} > 0, "
+                f"det(A) = {np.linalg.det(A):.3f} → **full clustering**"
+            )
+        elif regime.startswith("Full clustering: tr(A) ≤ 0"):
+            # tr(A) <= 0 & det(A) <= 0:
+            # In d-dim: build A with mixed eigenvalues — at least one positive,
+            # rest sufficiently negative so that tr <= 0 but det <= 0 (product of
+            # eigenvalues has sign determined by number of negative ones).
+            # Strategy: one large positive eigenvalue, rest negative but smaller in magnitude.
+            # This gives tr = pos + sum(neg) <= 0 possible, det = pos * prod(neg) <= 0
+            # since odd number of negatives gives det < 0.
+            n_neg     = d - 1   # d-1 negative eigenvalues, 1 positive
+            pos_val   = rng_mat.uniform(0.3, 0.8)                     # small positive
+            neg_vals  = -rng_mat.uniform(pos_val / (n_neg - 0.5),
+                                          pos_val / (n_neg - 0.5) * 1.5,
+                                          size=n_neg)                  # neg, sum > pos_val
+            eigvals_A = np.concatenate([[pos_val], neg_vals])
+            A_sym     = Q_orth @ np.diag(eigvals_A) @ Q_orth.T
+            perturb   = rng_mat.normal(0.0, 1.0, (d, d))
+            skew_pert = (perturb - perturb.T) * float(a_scale) * 0.2
+            A         = A_sym + skew_pert
+            tr_A  = np.trace(A)
+            det_A = np.linalg.det(A)
+            ev_A  = np.linalg.eigvals(A)
+            has_nonneg = any(v.real >= 0 for v in ev_A)
+            tr_ok  = tr_A  <= 0
+            det_ok = det_A <= 0
+            if tr_ok and det_ok and has_nonneg:
+                st.success(
+                    f"tr(A) = {tr_A:.3f} ≤ 0,  det(A) = {det_A:.3e} ≤ 0,  "
+                    f"A has eigenvalue with Re ≥ 0 → **full clustering**"
+                )
+            else:
+                st.warning(
+                    f"tr(A) = {tr_A:.3f},  det(A) = {det_A:.3e} — "
+                    f"conditions partially met (try adjusting seed or off-diagonal scale)"
+                )
         else:
+            # Build A with (A+A^T)/2 negative definite: use negative eigenvalues for sym part
             eigvals_A = rng_mat.uniform(0.5, 2.0, size=d)
-            A_sym     = Q_orth @ np.diag(-eigvals_A) @ Q_orth.T
+            A_sym     = Q_orth @ np.diag(-eigvals_A) @ Q_orth.T   # sym part is NSD
             perturb   = rng_mat.normal(0.0, 1.0, (d, d))
             skew_pert = (perturb - perturb.T) * float(a_scale) * 0.2
             A  = A_sym + skew_pert
-            sym_A = 0.5 * (A + A.T)
-            skw_A = 0.5 * (A - A.T)
-            cond2 = np.linalg.norm(sym_A, "fro") > np.linalg.norm(skw_A, "fro")
-            if cond2:
-                st.warning(f"tr(A) = {np.trace(A):.3f} < 0, ‖sym‖ > ‖skew‖ → **partial sync E₂ expected**")
+            sym_part_ev = np.linalg.eigvalsh(0.5*(A + A.T))
+            sym_nd = np.all(sym_part_ev < 0)
+            if sym_nd:
+                # Compute rho_eq analogue: ratio of Frobenius norms of skew to sym parts
+                sym_A = 0.5*(A + A.T)
+                skw_A = 0.5*(A - A.T)
+                rho_eq_approx = np.linalg.norm(skw_A, "fro") / np.linalg.norm(sym_A, "fro")
+                rho_eq_approx = min(rho_eq_approx, 0.999)
+                st.warning(
+                    f"(A+Aᵀ)/2 ≺ 0 (all sym eigenvalues < 0) → **partial sync**, "
+                    f"ρ_eq ≈ {rho_eq_approx:.3f} (2D formula generalised)"
+                )
             else:
-                st.error(f"tr(A) = {np.trace(A):.3f} < 0, ‖sym‖ ≤ ‖skew‖ → behavior uncertain")
+                st.error("Sym part not fully ND — increase off-diagonal scale or adjust seed")
         V = np.eye(d)
-        st.write(f"tr(A) = {np.trace(A):.4f}")
-        st.write("A + Aᵀ eigenvalues:", np.round(np.linalg.eigvalsh(A + A.T), 3).tolist())
-
+        ev_A_show = np.linalg.eigvals(A)
+        ev_strs = [f"{v.real:.3f}{v.imag:+.3f}j" if abs(v.imag)>1e-10 else f"{v.real:.3f}" for v in ev_A_show]
+        st.write("A eigenvalues:", "  |  ".join(ev_strs))
+        st.write(f"tr(A) = {np.trace(A):.4f},  det(A) = {np.linalg.det(A):.4f}")
+        st.write("(A+Aᵀ)/2 eigenvalues:", np.round(np.linalg.eigvalsh(0.5*(A+A.T)), 3).tolist())
+    
     elif case == "Case 2: A=I, V symmetric":
         st.markdown(r"""
 **Case 2**: $A = I$, $V$ symmetric.
@@ -158,6 +218,37 @@ Positive $\lambda_1$ → clustering; negative → dispersion.
         else:
             st.error(f"Top eigenvalue of V: **{actual_top:.3f}** → dispersion expected")
         st.write("All V eigenvalues:", np.round(np.sort(eigvals_V)[::-1], 3).tolist())
+
+  
+    elif case == "Case 3: A=I, V rotation":
+        st.markdown(r"""
+**Case 3**: $A = I$, $V = aI + bJ$ where $J$ is the block-diagonal skew matrix.
+
+In 2D this is $V = \begin{pmatrix}a & b \\ -b & a\end{pmatrix}$ with $a > 0$.
+The OA dynamics simplify to:
+$$\dot{\rho} = \tfrac{a\beta}{2}(1-\rho^2)\rho, \qquad \dot{\phi} = \tfrac{b\beta}{2}(\rho^2+3)$$
+
+Since $a > 0$, $\rho \to 1$ exponentially — **always clusters** regardless of $b$.
+The parameter $b$ controls **rotation speed** of the cluster phase $\phi$.
+For $d > 2$: $V$ is block-diagonal with $\lfloor d/2\rfloor$ identical $2\times 2$ blocks
+$\begin{pmatrix}a & b \\ -b & a\end{pmatrix}$, plus $V_{dd} = a$ if $d$ is odd.
+        """)
+        a_param = st.slider("a  (controls clustering rate)", min_value=0.01, max_value=3.0, value=1.0, step=0.05,
+                            help="Must be > 0 for clustering. Larger a = faster convergence.")
+        b_param = st.slider("b  (controls rotation)", min_value=-3.0, max_value=3.0, value=0.5, step=0.05,
+                            help="b=0: no rotation. b≠0: cluster phase rotates at rate b*beta/2*(rho^2+3).")
+        if a_param > 0:
+            st.success(f"a = {a_param} > 0 → **clustering guaranteed**, rotation rate ∝ b = {b_param}")
+        else:
+            st.error("a must be > 0 for clustering guarantee")
+        A = np.eye(d)
+        # Build V = block-diag of [[a,b],[-b,a]]
+        block = np.array([[a_param, b_param], [-b_param, a_param]])
+        V = np.zeros((d, d))
+        for i in range(0, d - 1, 2):
+            V[i:i+2, i:i+2] = block
+        if d % 2 == 1:
+            V[d-1, d-1] = a_param
 
     elif case == "Case 4: A=I, V Hamiltonian":
         st.markdown(r"""
@@ -350,21 +441,21 @@ std_cos   = cos_sim_time.std(axis=0)
 mean_cos2 = cos2_sim_time.mean(axis=0)
 std_cos2  = cos2_sim_time.std(axis=0)
 
-fig1, axes = plt.subplots(2, 1, figsize=(10, 12))
+fig1, axes = plt.subplots(2, 1, figsize=(15, 12))
 
 ax = axes[0]
 # Plot squared cosine similarity (correct clustering metric)
-ax.plot(sol.t, mean_cos2, color="tomato", lw=2, label=r"mean $\langle x_i,x_j\rangle^2$ (clustering)")
+ax.plot(sol.t, mean_cos2, color="tomato", lw=2, label=r"mean $\langle x_i,x_j\rangle^2$")
 ax.fill_between(sol.t, mean_cos2 - std_cos2, mean_cos2 + std_cos2,
                 alpha=0.2, color="tomato", label="±1 std")
 # Also show raw cosine sim as thin dashed for reference
 ax.plot(sol.t, mean_cos, color="steelblue", lw=1, linestyle='--',
-        alpha=0.6, label=r"mean $\langle x_i,x_j\rangle$ (raw, for ref)")
+        alpha=0.6, label=r"mean $\langle x_i,x_j\rangle$")
 ax.axhline(1.0, color='green', lw=0.8, linestyle='--', label='full clustering = 1')
 ax.axhline(0.0, color='gray',  lw=0.8, linestyle=':')
 ax.set_xlabel("t")
 ax.set_ylabel(r"$\langle x_i, x_j\rangle^2$")
-ax.set_title(f"Clustering metric — {case}")
+ax.set_title(f"Clustering metric — {case} - dim {d} - # of tokens: {n_tokens} - {label} attention")
 ax.set_xlim(0, T)
 ax.set_ylim(-0.05, 1.05)
 ax.legend(fontsize=8)
@@ -465,7 +556,7 @@ with st.expander("Pairwise cosine similarity distribution  (t=0 vs t=T)"):
             # Draw the spike at 1 as a separate bar so it is always visible
             bar_width = bins[1] - bins[0]
             ax_h.bar(1.0, len(at_one), width=bar_width, align="edge",
-                     color="green", alpha=0.8, label=f"clustered pairs: {len(at_one)} ({spike*100:.1f}%)")
+                     color="green", alpha=0.8, label=f"clustered pairs: {spike*100:.1f}%")
 
         ax_h.axvline(1.0, color="green", lw=1, linestyle="--")
         ax_h.set_xlabel(r"$\langle x_i,x_j\rangle^2$")
@@ -537,11 +628,16 @@ with st.expander("Cosine similarity matrices  (t=0 and t=T, cluster-sorted)"):
         uniformity = mat_std / (abs(mat_mean) + 1e-12)
 
         if uniformity < 1e-3:
-            # Essentially uniform — pin scale to avoid noise artefacts
+            # Essentially uniform — fill with solid red to signal single-cluster collapse.
+            # Using a 1-colour custom colormap avoids viridis autoscaling noise artefacts.
+            from matplotlib.colors import LinearSegmentedColormap
+            red_cmap = LinearSegmentedColormap.from_list("solid_red", ["#8D0226", "#5C001F"])
             d_val = abs(mat_mean) * 0.01 + 1e-9
-            im = axes3[ax_idx].imshow(score_mat, cmap="viridis", aspect="auto",
+            im = axes3[ax_idx].imshow(score_mat, cmap=red_cmap, aspect="auto",
                                       vmin=mat_mean - d_val, vmax=mat_mean + d_val)
-            axes3[ax_idx].set_title(f"<x_i, x_j> ({t_label})\n[uniform ≈ {mat_mean:.4f}]")
+            axes3[ax_idx].set_title(
+                f"<x_i, x_j> ({t_label})\n[★ single cluster — all entries ≈ {mat_mean:.4f}]"
+            )    
         else:
             # RdBu_r: red=+1 (same cluster), white=0 (orthogonal), blue=-1 (antipodal)
             im = axes3[ax_idx].imshow(score_mat, cmap="RdBu_r", aspect="auto",
@@ -564,11 +660,11 @@ with st.expander("Cosine similarity matrices  (t=0 and t=T, cluster-sorted)"):
         plt.colorbar(im, ax=axes3[ax_idx])
 
     # Cluster size annotation
-    if 0 < n_plus < n_tokens:
-        fig3.text(0.5, -0.02,
-                  f"Gold line separates cluster+ ({n_plus} tokens) | cluster- ({n_tokens-n_plus} tokens). "
-                  f"Sorting derived from t=T positions, applied to both plots.",
-                  ha="center", fontsize=8, style="italic")
+    # if 0 < n_plus < n_tokens:
+    #     fig3.text(0.5, -0.02,
+    #               f"Gold line separates cluster+ ({n_plus} tokens) | cluster- ({n_tokens-n_plus} tokens). "
+    #               f"Sorting derived from t=T positions, applied to both plots.",
+    #               ha="center", fontsize=8, style="italic")
     plt.tight_layout()
     st.pyplot(fig3)
     st.caption(
